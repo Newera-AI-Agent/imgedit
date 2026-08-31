@@ -27,6 +27,10 @@ on:
         description: 'Parent job id when this run is a relay continuation'
         required: false
         default: ''
+      handoff_b64:
+        description: 'Base64 handoff brief from the previous session (resume_vm_agent chains; empty for fresh jobs)'
+        required: false
+        default: ''
 
 concurrency:
   # One VM job per job id — a re-dispatch replaces the previous runner.
@@ -67,6 +71,7 @@ jobs:
           NEWERA_MAX_MINUTES: ${{ github.event.inputs.max_minutes }}
           NEWERA_RELAY_INDEX: ${{ github.event.inputs.relay_index }}
           NEWERA_RELAY_OF: ${{ github.event.inputs.relay_of }}
+          NEWERA_HANDOFF_B64: ${{ github.event.inputs.handoff_b64 }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e

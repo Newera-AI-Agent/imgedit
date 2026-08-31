@@ -18,6 +18,12 @@ const TASK = Buffer.from(process.env.NEWERA_TASK_B64 || "", "base64").toString("
 const MAX_MINUTES = Math.max(5, Number(process.env.NEWERA_MAX_MINUTES) || 30);
 const DEADLINE = Date.now() + Math.max(5, MAX_MINUTES - 6) * 60 * 1000;
 const MAX_STEPS = 600;
+// Resume-chain handoff (resume_vm_agent): the EXPLICIT continuation path
+// seeds this VM with the previous session handoff via NEWERA_HANDOFF_B64.
+// Relay children get their continuation embedded in TASK instead, so this
+// stays empty there. When present, the first message points the agent at
+// the handoff and forbids redoing committed work.
+const HANDOFF = Buffer.from(process.env.NEWERA_HANDOFF_B64 || "", "base64").toString("utf8").trim();
 const REPO = process.env.GITHUB_REPOSITORY || "";
 const GIT_TOKEN = process.env.GITHUB_TOKEN || "";
 const ROOT = process.cwd();
@@ -62,7 +68,7 @@ function log(line) {
 
 function minutesLeft() { return Math.max(0, Math.round((DEADLINE - Date.now()) / 60000)); }
 
-async function apiPost(pathname, body) {
+async function apiPost(pathname, body, timeoutMs) {
   const res = await fetch(API + pathname, {
     method: "POST",
     headers: {
@@ -71,7 +77,9 @@ async function apiPost(pathname, body) {
       "X-Newera-Job": JOB_ID,
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(280000),
+    // Per-call deadline: model calls get 180 s (long generations are real);
+    // progress reports 30 s; the default stays generous for safety.
+    signal: AbortSignal.timeout(timeoutMs || 280000),
   });
   const text = await res.text();
   let data = null;
@@ -85,10 +93,28 @@ async function apiPost(pathname, body) {
   return data || {};
 }
 
+// Lightweight GET with the same auth headers — used by the boot-time
+// control-plane reachability check (fail fast instead of 25 silent minutes).
+async function apiGet(pathname, timeoutMs) {
+  const res = await fetch(API + pathname, {
+    headers: {
+      Authorization: "Bearer " + TOKEN,
+      "X-Newera-Job": JOB_ID,
+    },
+    signal: AbortSignal.timeout(timeoutMs || 15000),
+  });
+  if (!res.ok) {
+    const err = new Error("control plane: HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  return true;
+}
+
 // purpose: "steps" (the coder model — default) or "summarize" (the cheap
 // rag model). The server picks the actual model id; the runner cannot shop.
 async function callModel(messages, purpose) {
-  const data = await apiPost("/api/vm/agent", { messages: messages, purpose: purpose || "steps" });
+  const data = await apiPost("/api/vm/agent", { messages: messages, purpose: purpose || "steps" }, 180000);
   if (typeof data.content !== "string" || !data.content.trim()) {
     throw new Error("empty model response");
   }
@@ -96,13 +122,18 @@ async function callModel(messages, purpose) {
 }
 
 function reportProgress(payload) {
-  return apiPost("/api/vm/agent", { progress: payload }).catch(function (e) {
+  return apiPost("/api/vm/agent", { progress: payload }, 30000).catch(function (e) {
     log("[progress] failed: " + e.message);
   });
 }
 
-function reportFinal(summary, unfinished) {
-  return apiPost("/api/vm/agent", { event: "final", summary: String(summary || "").slice(0, 8000), unfinished: Boolean(unfinished) }).catch(function (e) {
+function reportFinal(summary, unfinished, handoff) {
+  const body = { event: "final", summary: String(summary || "").slice(0, 8000), unfinished: Boolean(unfinished) };
+  // Optional handoff: lets the control plane store a resumable continuation
+  // brief on the job even when the auto-relay could not fire (short job,
+  // relay budget spent) — resume_vm_agent then seeds the next VM from it.
+  if (handoff && String(handoff).trim()) body.handoff = String(handoff).slice(0, 12000);
+  return apiPost("/api/vm/agent", body, 30000).catch(function (e) {
     log("[final-report] failed: " + e.message);
   });
 }
@@ -112,7 +143,7 @@ function reportFinal(summary, unfinished) {
 // next VM simply checks it out and continues. Server-side this creates a
 // child VmJob linked through nextJobId and dispatches the workflow.
 function reportRelay(handoff) {
-  return apiPost("/api/vm/agent", { event: "relay", handoff: String(handoff || "").slice(0, 24000) }).catch(function (e) {
+  return apiPost("/api/vm/agent", { event: "relay", handoff: String(handoff || "").slice(0, 24000) }, 30000).catch(function (e) {
     log("[relay] failed: " + e.message);
   });
 }
@@ -121,7 +152,7 @@ function reportRelay(handoff) {
 // enter the VM: the browser side deploys the uploaded build-output artifact
 // through the existing /api/deploy/cloudflare route after the run completes.
 function reportDeployRequest(subdomain, mode) {
-  return apiPost("/api/vm/agent", { event: "deploy_request", subdomain: subdomain, mode: mode }).catch(function (e) {
+  return apiPost("/api/vm/agent", { event: "deploy_request", subdomain: subdomain, mode: mode }, 30000).catch(function (e) {
     log("[deploy-request] failed: " + e.message);
   });
 }
@@ -880,16 +911,33 @@ async function main() {
     log("[fatal] missing NEWERA_API_URL or NEWERA_JOB_TOKEN");
     process.exit(2);
   }
+  // CONTROL-PLANE REACHABILITY (fail fast, like a human SSH-ing in and
+  // checking the network first): if this deployment cannot be reached from
+  // GitHub (localhost / LAN URL, dead host, firewall), the OLD behavior was
+  // 5 model retries with 280 s timeouts — ~25 silent minutes before the
+  // runner gave up. Now: one 15 s probe, an explicit reason in the log
+  // (surfaced by watch_vm_agent as a fast FAILED), exit immediately.
+  try {
+    await apiGet("/api/vm/jobs/" + encodeURIComponent(JOB_ID), 15000);
+    log("[boot] control plane reachable at " + API);
+  } catch (e) {
+    log("[fatal] CONTROL PLANE UNREACHABLE at " + API + " — " + (e.message || e));
+    log("[fatal] VM jobs need a PUBLIC NewEra deployment: GitHub Actions runners cannot reach localhost or LAN addresses.");
+    process.exit(2);
+  }
   const tree = [];
   listFilesTree(ROOT, 3, "", tree);
   const relayNote = RELAY_INDEX > 0
     ? "You are the CONTINUATION VM (relay " + RELAY_INDEX + " of " + MAX_RELAYS + "). The prior VM wrote .newera/vm/handoff.md — read it FIRST, verify the repo state, then continue the task. Do not redo finished work.\n\n"
     : "";
+  const resumeNote = HANDOFF
+    ? "You are a RESUMED session (the user asked to continue a finished job). The previous session left this handoff — obey it, verify the repo state with one fast command, then CONTINUE. Do not redo committed work.\n\n--- HANDOFF ---\n" + HANDOFF.slice(0, 8000) + "\n--- END HANDOFF ---\n\n"
+    : "";
   const history = [
     { role: "system", content: SYSTEM_PROMPT },
     {
       role: "user",
-      content: relayNote + "## BUILD PLAN / TASK\n" + TASK + "\n\n## REPOSITORY (top of tree)\n" + tree.slice(0, 200).join("\n") +
+      content: relayNote + resumeNote + "## BUILD PLAN / TASK\n" + TASK + "\n\n## REPOSITORY (top of tree)\n" + tree.slice(0, 200).join("\n") +
         "\n\nStart now. Remember: ONE JSON object per reply.",
     },
   ];
@@ -919,8 +967,16 @@ async function main() {
 
     if (Date.now() >= DEADLINE) {
       log("[deadline] time budget exhausted");
-      const summary = "TIME LIMIT REACHED after " + step + " steps. All work so far is committed to the repo and packaged in the artifact.";
-      await reportFinal(summary, true);
+      // Write a handoff so the work is resumable even when the auto-relay
+      // cannot fire (short budget / relay budget spent): resume_vm_agent
+      // boots the next VM from exactly this document.
+      const deadlineHandoff = await buildHandoff(step);
+      try {
+        fs.mkdirSync(path.join(ROOT, ".newera", "vm"), { recursive: true });
+        fs.writeFileSync(path.join(ROOT, ".newera", "vm", "handoff.md"), deadlineHandoff + "\n", "utf8");
+      } catch (e) {}
+      const summary = "TIME LIMIT REACHED after " + step + " steps. All work so far is committed to the repo and packaged in the artifact; the handoff at .newera/vm/handoff.md carries the continuation plan.";
+      await reportFinal(summary, true, deadlineHandoff);
       writeResultSummary(summary);
       await gitCommitIfNeeded("agent: checkpoint at time limit");
       return;
@@ -928,9 +984,12 @@ async function main() {
 
     let raw = "";
     let modelError = null;
+    let timeoutErrors = 0;
     // 5 attempts with growing backoff: a provider-side 429/503 burst must
     // not kill a job that has 20 minutes of budget left. Hard 4xx (auth,
-    // schema) still abort immediately — retrying those is pointless.
+    // schema) still abort immediately — retrying those is pointless. Three
+    // consecutive TIMEOUTS also abort early: a hanging control plane or
+    // provider is a structural fault, not a burst to wait out.
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         raw = await callModel(history, "steps");
@@ -939,13 +998,19 @@ async function main() {
       } catch (err) {
         modelError = err;
         log("[model] attempt " + (attempt + 1) + " failed: " + err.message);
+        var isTimeout = err && (err.name === "TimeoutError" || /aborted|timed out|timeout/i.test(String(err.message || "")));
+        if (isTimeout) timeoutErrors++;
         if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
+        if (timeoutErrors >= 3) {
+          log("[model] three timeouts — control plane or provider is hanging; aborting early instead of burning the budget.");
+          break;
+        }
         await new Promise(function (r) { setTimeout(r, 4000 * (attempt + 1)); });
       }
     }
     if (modelError) {
-      await reportFinal("ABORTED: model proxy unreachable — " + modelError.message, true);
-      writeResultSummary("ABORTED: model proxy unreachable — " + modelError.message);
+      await reportFinal("ABORTED: model proxy unreachable — " + modelError.message + " (control plane: " + API + ")", true);
+      writeResultSummary("ABORTED: model proxy unreachable — " + modelError.message + " (control plane: " + API + ")");
       await gitCommitIfNeeded("agent: abort (model proxy unreachable)");
       process.exit(3);
     }
@@ -1046,8 +1111,13 @@ async function main() {
     }
   }
 
-  const stepSummary = "STEP LIMIT reached (" + MAX_STEPS + " steps). Work so far is committed and packaged.";
-  await reportFinal(stepSummary, true);
+  const stepSummary = "STEP LIMIT reached (" + MAX_STEPS + " steps). Work so far is committed and packaged; the handoff at .newera/vm/handoff.md carries the continuation plan.";
+  const stepHandoff = await buildHandoff(MAX_STEPS);
+  await reportFinal(stepSummary, true, stepHandoff);
+  try {
+    fs.mkdirSync(path.join(ROOT, ".newera", "vm"), { recursive: true });
+    fs.writeFileSync(path.join(ROOT, ".newera", "vm", "handoff.md"), stepHandoff + "\n", "utf8");
+  } catch (e) {}
   writeResultSummary(stepSummary);
   await gitCommitIfNeeded("agent: step limit checkpoint");
 }
