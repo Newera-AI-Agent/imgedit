@@ -1,3 +1,3 @@
 # VM agent result
 
-ABORTED: model proxy unreachable — control plane: no coder model configured
+ABORTED: model kept replying outside the JSON protocol after 49 steps.
