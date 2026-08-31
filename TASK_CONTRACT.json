@@ -1,12 +1,12 @@
 {
-  "originalRequest": "public , imgedit",
-  "normalizedInterpretation": "public , imgedit",
+  "originalRequest": "public and ingeditz should be subdomain",
+  "normalizedInterpretation": "public and ingeditz should be subdomain",
   "assumptions": [],
   "profile": "fast",
   "requirements": [
     {
       "id": "REQ-001",
-      "description": "public , imgedit",
+      "description": "public and ingeditz should be subdomain",
       "mandatory": true,
       "status": "pending",
       "evidenceType": "custom",
@@ -14,7 +14,7 @@
     }
   ],
   "featureMatrix": [
-    "public , imgedit"
+    "public and ingeditz should be subdomain"
   ],
   "contentMatrix": [],
   "assetManifest": [],
@@ -24,6 +24,6 @@
   "platformRequirements": [],
   "permissions": [],
   "deferredItems": [],
-  "createdAt": 1788183974641,
-  "updatedAt": 1788183974643
+  "createdAt": 1788184656793,
+  "updatedAt": 1788184656793
 }
