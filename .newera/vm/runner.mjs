@@ -94,7 +94,15 @@ async function apiPost(pathname, body, timeoutMs) {
 }
 
 // Lightweight GET with the same auth headers — used by the boot-time
-// control-plane reachability check (fail fast instead of 25 silent minutes).
+// control-plane reachability check (fail fast instead of 25 silent
+// minutes). It targets /api/vm/agent on purpose: the one path the app
+// middleware leaves open to server-to-server callers, with its own
+// per-job bearer auth — a 200 here proves the FULL callback chain (public
+// URL + no protection wall + valid job token). v3.1 probed
+// /api/vm/jobs/<id>, which is origin/token gated: in production the probe
+// itself was 403'd and every job died at boot on a perfectly reachable
+// deployment. The body is sniffed so a protection/challenge HTML page is
+// reported as what it is instead of a bare status code.
 async function apiGet(pathname, timeoutMs) {
   const res = await fetch(API + pathname, {
     headers: {
@@ -103,8 +111,12 @@ async function apiGet(pathname, timeoutMs) {
     },
     signal: AbortSignal.timeout(timeoutMs || 15000),
   });
+  const text = await res.text().catch(function () { return ""; });
   if (!res.ok) {
-    const err = new Error("control plane: HTTP " + res.status);
+    const t = String(text || "").trim();
+    const isHtml = t.length > 0 && t.charAt(0) === "<";
+    const detail = "control plane: HTTP " + res.status + (isHtml ? " (an HTML protection/challenge page, not the app)" : " " + t.slice(0, 200));
+    const err = new Error(detail);
     err.status = res.status;
     throw err;
   }
@@ -645,6 +657,10 @@ async function runSubagent(spec, parentStep) {
       } catch (err) {
         modelError = err;
         if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
+        // v3.4: a 500 "no coder model configured" is a PERMANENT control-plane
+        // misconfiguration — retrying with backoff only burns time before the
+        // same abort. Stop after the first attempt; the abort message names the fix.
+        if (err.status === 500 && /no coder model configured/.test(String(err.message || ""))) break;
         await new Promise(function (r) { setTimeout(r, 3000 * (attempt + 1)); });
       }
     }
@@ -918,11 +934,20 @@ async function main() {
   // runner gave up. Now: one 15 s probe, an explicit reason in the log
   // (surfaced by watch_vm_agent as a fast FAILED), exit immediately.
   try {
-    await apiGet("/api/vm/jobs/" + encodeURIComponent(JOB_ID), 15000);
-    log("[boot] control plane reachable at " + API);
+    await apiGet("/api/vm/agent", 15000);
+    log("[boot] control plane reachable at " + API + " — job token accepted");
   } catch (e) {
+    const code = (e && e.status) || 0;
     log("[fatal] CONTROL PLANE UNREACHABLE at " + API + " — " + (e.message || e));
-    log("[fatal] VM jobs need a PUBLIC NewEra deployment: GitHub Actions runners cannot reach localhost or LAN addresses.");
+    if (code === 401) {
+      log("[fatal] The deployment answered but REJECTED this job token (record lost, KV reset, or a re-deployed control plane). Re-dispatch with start_vm_agent.");
+    } else if (code === 403) {
+      log("[fatal] HTTP 403 = a protection wall in front of the app. /api/vm/agent is exempt from the app-side NEWERA_ACCESS_TOKEN gate, so a 403 here is a HOSTING-layer block: on Vercel check Project Settings > Deployment Protection (disable it) and Firewall / Attack Challenge Mode (add a bypass for /api/* or /api/vm/*).");
+    } else if (code === 404) {
+      log("[fatal] HTTP 404 = this deployment does not serve /api/vm/agent — an older NewEra build is live at that URL. Redeploy the current source.");
+    } else {
+      log("[fatal] VM jobs need a PUBLIC NewEra deployment: GitHub Actions runners cannot reach localhost or LAN addresses.");
+    }
     process.exit(2);
   }
   const tree = [];
@@ -1001,6 +1026,10 @@ async function main() {
         var isTimeout = err && (err.name === "TimeoutError" || /aborted|timed out|timeout/i.test(String(err.message || "")));
         if (isTimeout) timeoutErrors++;
         if (err.status && err.status >= 400 && err.status < 500 && err.status !== 429) break;
+        // v3.4: a 500 "no coder model configured" is a PERMANENT control-plane
+        // misconfiguration — retrying with backoff only burns time before the
+        // same abort. Stop after the first attempt; the abort message names the fix.
+        if (err.status === 500 && /no coder model configured/.test(String(err.message || ""))) break;
         if (timeoutErrors >= 3) {
           log("[model] three timeouts — control plane or provider is hanging; aborting early instead of burning the budget.");
           break;
