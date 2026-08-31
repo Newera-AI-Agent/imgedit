@@ -11,7 +11,7 @@ import {
   DEFAULT_TRANSFORM,
   computeCenteredCrop,
 } from '../lib/canvas';
-import { validateImageFile, formatFileSize } from '../lib/validation';
+import { validateImageFile } from '../lib/validation';
 
 // ── Types ──
 
