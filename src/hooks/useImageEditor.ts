@@ -5,13 +5,13 @@ import type {
   EditorAdjustments,
   EditorTransform,
   CropRect,
-} from '@/lib/canvas';
+} from '../lib/canvas';
 import {
   DEFAULT_ADJUSTMENTS,
   DEFAULT_TRANSFORM,
   computeCenteredCrop,
-} from '@/lib/canvas';
-import { validateImageFile, formatFileSize } from '@/lib/validation';
+} from '../lib/canvas';
+import { validateImageFile, formatFileSize } from '../lib/validation';
 
 // ── Types ──
 

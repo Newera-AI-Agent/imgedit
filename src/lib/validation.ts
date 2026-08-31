@@ -1,6 +1,4 @@
-/**
- * Client-side file validation for image imports.
- */
+/** Client-side validation and filename helpers for image imports. */
 
 export const SUPPORTED_TYPES = [
   'image/png',
@@ -20,7 +18,6 @@ export const SUPPORTED_EXTENSIONS = [
   '.tif',
 ] as const;
 
-/** Maximum file size: 50 MB */
 export const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 export interface ValidationResult {
@@ -28,18 +25,9 @@ export interface ValidationResult {
   error?: string;
 }
 
-/**
- * Validate a File object for supported type and size.
- */
 export function validateImageFile(file: File): ValidationResult {
-  if (!file) {
-    return { valid: false, error: 'No file selected.' };
-  }
-
-  if (file.size === 0) {
-    return { valid: false, error: 'The selected file is empty.' };
-  }
-
+  if (!file) return { valid: false, error: 'No file selected.' };
+  if (file.size === 0) return { valid: false, error: 'The selected file is empty.' };
   if (file.size > MAX_FILE_SIZE) {
     const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
     return {
@@ -49,32 +37,26 @@ export function validateImageFile(file: File): ValidationResult {
   }
 
   const mimeType = file.type.toLowerCase();
-  const extension = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '');
-
+  const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
   const typeValid = (SUPPORTED_TYPES as readonly string[]).includes(mimeType);
-  const extValid = (SUPPORTED_EXTENSIONS as readonly string[]).includes(extension);
-
-  if (!typeValid && !extValid) {
-    return {
-      valid: false,
-      error: `Unsupported file type. Please use PNG, JPEG, WebP, BMP, or TIFF files.`,
-    };
+  const extensionValid = (SUPPORTED_EXTENSIONS as readonly string[]).includes(extension);
+  if (!typeValid && !extensionValid) {
+    return { valid: false, error: 'Unsupported file type. Please use PNG, JPEG, WebP, BMP, or TIFF files.' };
   }
 
   return { valid: true };
 }
 
-/**
- * Get a safe export filename based on the original filename.
- */
-export function getExportFilename(
-  originalName: string | undefined,
-  extension: 'png' | 'jpg'
-): string {
-  const base = originalName
-    ? originalName.replace(/\.[^.]+$/, '') || 'edited'
-    : 'edited';
-  // Sanitize: remove path separators and limit length
-  const sanitized = base.replace(/[/\\:*?"<>|]/g, '_').slice(0, 100);
-  return `${sanitized}-edited.${extension}`;
+
+export function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
