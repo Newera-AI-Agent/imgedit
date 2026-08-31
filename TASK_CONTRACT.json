@@ -1,12 +1,12 @@
 {
-  "originalRequest": "public, imgedit",
-  "normalizedInterpretation": "public, imgedit",
+  "originalRequest": "public , imgedit",
+  "normalizedInterpretation": "public , imgedit",
   "assumptions": [],
   "profile": "fast",
   "requirements": [
     {
       "id": "REQ-001",
-      "description": "public, imgedit",
+      "description": "public , imgedit",
       "mandatory": true,
       "status": "pending",
       "evidenceType": "custom",
@@ -14,7 +14,7 @@
     }
   ],
   "featureMatrix": [
-    "public, imgedit"
+    "public , imgedit"
   ],
   "contentMatrix": [],
   "assetManifest": [],
@@ -24,6 +24,6 @@
   "platformRequirements": [],
   "permissions": [],
   "deferredItems": [],
-  "createdAt": 1788178566157,
-  "updatedAt": 1788178566157
+  "createdAt": 1788183974641,
+  "updatedAt": 1788183974643
 }
